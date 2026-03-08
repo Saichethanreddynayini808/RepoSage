@@ -49,7 +49,7 @@ MAX_TOTAL_CHARS = 400_000   # ~100k tokens — safe limit for most tiers
 LARGE_REPO_THRESHOLD = 500  # Warn user before analyzing repos with >500 files
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
-OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_BASE_URL = "http://localhost:11434"  # default; overridable per-request
 
 SYSTEM_PROMPT = """You are an expert code analyst. Analyze this repository thoroughly. Explain:
 1) What the project does and why it exists
@@ -106,12 +106,14 @@ class RepoAnalyzer:
 
     def __init__(
         self,
-        provider: str = "claude",   # "claude" or "ollama"
-        api_key: str = "",          # Anthropic key (ignored for Ollama)
+        provider: str = "claude",           # "claude" or "ollama"
+        api_key: str = "",                  # Anthropic key (ignored for Ollama)
         ollama_model: str = "llama3.2",
+        ollama_base_url: str = OLLAMA_BASE_URL,  # custom endpoint, e.g. LM Studio
     ):
         self.provider = provider
         self.ollama_model = ollama_model
+        self.ollama_base_url = ollama_base_url.rstrip("/")
         self._temp_dir: str | None = None
 
         # Lazily import anthropic only when using Claude, so the app works
@@ -324,7 +326,7 @@ class RepoAnalyzer:
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(
-                    f"{OLLAMA_BASE_URL}/api/chat",
+                    f"{self.ollama_base_url}/api/chat",
                     json={
                         "model": self.ollama_model,
                         "messages": [{"role": "user", "content": prompt}],
@@ -395,7 +397,70 @@ class RepoAnalyzer:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 async with client.stream(
                     "POST",
-                    f"{OLLAMA_BASE_URL}/api/chat",
+                    f"{self.ollama_base_url}/api/chat",
+                    json={
+                        "model": self.ollama_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": True,
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            chunk = data.get("message", {}).get("content", "")
+                            if chunk:
+                                yield chunk
+                            if data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
+        except httpx.ConnectError:
+            raise OllamaNotRunningError(
+                "Cannot connect to Ollama. Make sure it's running with: ollama serve"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Ollama error: {e}")
+
+    # ------------------------------------------------------------------
+    # Direct comparison (no chat wrapper, longer timeout for large payloads)
+    # ------------------------------------------------------------------
+
+    async def compare(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Stream a codebase comparison — prompt is sent directly, no context headers."""
+        if self.provider == "ollama":
+            async for chunk in self._compare_ollama(prompt):
+                yield chunk
+        else:
+            async for chunk in self._compare_claude(prompt):
+                yield chunk
+
+    async def _compare_claude(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Send the comparison prompt straight to Claude as a single user message."""
+        try:
+            with self._claude.messages.stream(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    yield text
+        except Exception as e:
+            err = str(e).lower()
+            if "authentication" in err or "invalid x-api-key" in err or "401" in err:
+                raise AuthError("Invalid API key. Check your Anthropic console.")
+            raise
+
+    async def _compare_ollama(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Stream comparison from a local Ollama model with an extended timeout."""
+        try:
+            # 600 s — two full analyses can be large; give Ollama plenty of time.
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.ollama_base_url}/api/chat",
                     json={
                         "model": self.ollama_model,
                         "messages": [{"role": "user", "content": prompt}],
@@ -427,18 +492,22 @@ class RepoAnalyzer:
 # Ollama model listing (called by the /ollama/models endpoint)
 # ---------------------------------------------------------------------------
 
-async def list_ollama_models() -> dict:
+async def list_ollama_models(base_url: str = OLLAMA_BASE_URL) -> dict:
     """
-    Check whether Ollama is reachable and return its installed models.
+    Check whether Ollama (or compatible server) is reachable and return its installed models.
+
+    Args:
+        base_url: The base URL to probe, e.g. "http://localhost:11434" (Ollama),
+                  "http://localhost:1234" (LM Studio), "http://localhost:8080" (LocalAI).
 
     Returns {"running": bool, "models": list[str]} where:
-      - running=True means we successfully connected to Ollama (even if no models installed)
-      - running=False means the connection failed (Ollama not started)
-    This separates "Ollama is running but has no models" from "Ollama is not running".
+      - running=True means we successfully connected (even if no models installed)
+      - running=False means the connection failed (server not started)
     """
+    url = base_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp = await client.get(f"{url}/api/tags")
             resp.raise_for_status()
             data = resp.json()
             models = [m["name"] for m in data.get("models", [])]

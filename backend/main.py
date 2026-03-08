@@ -21,6 +21,7 @@ from analyzer import (
     RepoNotFoundError,
     OllamaNotRunningError,
     LARGE_REPO_THRESHOLD,
+    OLLAMA_BASE_URL,
 )
 
 app = FastAPI(title="RepoSage API")
@@ -40,9 +41,10 @@ app.add_middleware(
 
 class AnalyzeRequest(BaseModel):
     # AI provider
-    provider: str = "claude"        # "claude" or "ollama"
-    api_key: str = ""               # Anthropic key (ignored for Ollama)
-    ollama_model: str = "llama3.2"  # Ollama model name (ignored for Claude)
+    provider: str = "claude"                        # "claude" or "ollama"
+    api_key: str = ""                               # Anthropic key (ignored for Ollama)
+    ollama_model: str = "llama3.2"                  # Ollama model name (ignored for Claude)
+    ollama_base_url: str = "http://localhost:11434"  # Custom endpoint for LM Studio, etc.
 
     # Repository source
     source_type: str                # "github" or "local"
@@ -57,9 +59,21 @@ class ChatRequest(BaseModel):
     provider: str = "claude"
     api_key: str = ""
     ollama_model: str = "llama3.2"
+    ollama_base_url: str = "http://localhost:11434"
     question: str
     analysis: str
     file_contents: str
+
+
+class CompareRequest(BaseModel):
+    provider: str = "claude"
+    api_key: str = ""
+    ollama_model: str = "llama3.2"
+    ollama_base_url: str = "http://localhost:11434"
+    analysis_a: str
+    analysis_b: str
+    repo_name_a: str = "Repo A"
+    repo_name_b: str = "Repo B"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +126,7 @@ async def analyze_repo(request: AnalyzeRequest):
             provider=request.provider,
             api_key=request.api_key,
             ollama_model=request.ollama_model,
+            ollama_base_url=request.ollama_base_url,
         )
         try:
             # --- Step 1: Clone / read files ---
@@ -183,6 +198,7 @@ async def chat(request: ChatRequest):
             provider=request.provider,
             api_key=request.api_key,
             ollama_model=request.ollama_model,
+            ollama_base_url=request.ollama_base_url,
         )
         try:
             async for chunk in analyzer.chat(
@@ -199,14 +215,70 @@ async def chat(request: ChatRequest):
 
 
 @app.get("/ollama/models")
-async def ollama_models():
+async def ollama_models(base_url: str = OLLAMA_BASE_URL):
     """
-    Return Ollama connectivity status and installed model list.
-    'running' reflects whether we can reach Ollama at all — it is True
-    even when Ollama is running but has no models installed yet.
+    Return connectivity status and installed model list for the given base URL.
+    Accepts ?base_url=http://localhost:1234 for LM Studio, LocalAI, etc.
+    'running' is True even when the server is up but has no models installed.
     """
-    result = await list_ollama_models()
+    result = await list_ollama_models(base_url=base_url)
     return result  # already {"running": bool, "models": [...]}
+
+
+COMPARE_PROMPT = """You are an expert software architect. Compare these two codebases based on the analyses below.
+
+Highlight differences in:
+1. **Tech Stack** — languages, frameworks, libraries, tooling
+2. **Architecture** — structure, patterns, modularity, separation of concerns
+3. **Code Patterns** — conventions, style, quality, test coverage signals
+4. **Complexity** — size, coupling, cognitive load for a new developer
+5. **Strengths & Weaknesses** — what each does well and where it falls short
+6. **Best Suited For** — what use-cases or teams each codebase is better suited for
+
+Conclude with a brief verdict: which is more maintainable, and why.
+
+---
+
+## {name_a} Analysis
+
+{analysis_a}
+
+---
+
+## {name_b} Analysis
+
+{analysis_b}
+"""
+
+
+@app.post("/compare")
+async def compare_repos(request: CompareRequest):
+    """
+    SSE stream that sends both analyses to the AI and streams a comparison report.
+    """
+    async def generate():
+        analyzer = RepoAnalyzer(
+            provider=request.provider,
+            api_key=request.api_key,
+            ollama_model=request.ollama_model,
+            ollama_base_url=request.ollama_base_url,
+        )
+        prompt = COMPARE_PROMPT.format(
+            name_a=request.repo_name_a,
+            name_b=request.repo_name_b,
+            analysis_a=request.analysis_a,
+            analysis_b=request.analysis_b,
+        )
+        try:
+            async for chunk in analyzer.compare(prompt):
+                yield sse({"chunk": chunk})
+            yield sse({"done": True})
+        except Exception as e:
+            yield sse({"error": friendly_error(e)})
+        finally:
+            analyzer.cleanup()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.get("/health")

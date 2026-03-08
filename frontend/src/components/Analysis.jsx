@@ -11,13 +11,14 @@
  *   └──────────┴──────────────────────────────┘
  */
 
-import { useState, useRef, useLayoutEffect, useCallback } from 'react'
+import { useState, useEffect, useRef, useLayoutEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import FileTree from './FileTree.jsx'
 import ChatBox from './ChatBox.jsx'
+import { generateHtmlReport, downloadFile, repoSlug, todaySlug } from '../utils/htmlExport.js'
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
@@ -181,11 +182,58 @@ function Divider({ onMouseDown }) {
   )
 }
 
+// ─── Loading skeleton ─────────────────────────────────────────────────────────
+
+const SHIMMER_CSS = `
+  @keyframes shimmer {
+    0%   { background-position:  200% 0 }
+    100% { background-position: -200% 0 }
+  }
+`
+const SHIMMER = {
+  background: 'linear-gradient(90deg, #21262d 25%, #30363d 50%, #21262d 75%)',
+  backgroundSize: '200% 100%',
+  animation: 'shimmer 1.5s infinite',
+  borderRadius: '4px',
+}
+
+function AnalysisSkeleton() {
+  const bar = (w, h = 12, mb = 10, extra = {}) => (
+    <div style={{ ...SHIMMER, width: w, height: h, marginBottom: mb, ...extra }} />
+  )
+  return (
+    <div style={{ padding: '32px 40px', maxWidth: '860px', margin: '0 auto' }}>
+      <style>{SHIMMER_CSS}</style>
+      {bar('55%', 22, 24)}
+      {bar('100%')} {bar('92%')} {bar('78%', 12, 28)}
+      {bar('42%', 17, 18)}
+      {[...Array(4)].map((_, i) => (
+        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ ...SHIMMER, width: 7, height: 7, borderRadius: '50%', flexShrink: 0 }} />
+          <div style={{ ...SHIMMER, width: `${[100, 88, 76, 92][i]}%`, height: 12 }} />
+        </div>
+      ))}
+      <div style={{ marginTop: 20, marginBottom: 28 }}>{bar('100%', 88, 0, { borderRadius: 8 })}</div>
+      {bar('48%', 17, 16)}
+      {bar('100%')} {bar('85%')} {bar('68%', 12, 24)}
+      {bar('100%', 60, 0, { borderRadius: 8 })}
+    </div>
+  )
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function Analysis({ data, aiConfig }) {
-  const { analysis, fileTree, fileContents, estimatedTokens } = data
+  const { analysis, fileTree, fileContents, estimatedTokens, repoName } = data
   const [copyLabel, setCopyLabel] = useState('Copy')
+
+  // Show a skeleton for ~700 ms on first mount to smooth the transition
+  // from the progress screen to the rendered markdown content.
+  const [showSkeleton, setShowSkeleton] = useState(true)
+  useEffect(() => {
+    const t = setTimeout(() => setShowSkeleton(false), 700)
+    return () => clearTimeout(t)
+  }, [])
 
   // Pixel height of the analysis area. null until the content div mounts,
   // at which point useLayoutEffect seeds it to 60% of the available height.
@@ -209,17 +257,18 @@ export default function Analysis({ data, aiConfig }) {
     })
   }
 
-  /** Download the analysis as a timestamped .md file. */
-  function handleExport() {
-    const timestamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-')
-    const filename = `reposage-analysis-${timestamp}.md`
-    const blob = new Blob([analysis], { type: 'text/markdown' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url)
+  /** Download the analysis as a .md file. */
+  function handleExportMarkdown() {
+    const slug = repoSlug(repoName)
+    const filename = `reposage-${slug}-${todaySlug()}.md`
+    downloadFile(analysis, filename, 'text/markdown')
+  }
+
+  /** Download a fully self-contained .html report. */
+  function handleExportHtml() {
+    const html = generateHtmlReport({ analysis, fileTree, repoName, estimatedTokens, aiConfig })
+    const slug = repoSlug(repoName)
+    downloadFile(html, `reposage-${slug}-${todaySlug()}.html`, 'text/html')
   }
 
   /**
@@ -267,8 +316,14 @@ export default function Analysis({ data, aiConfig }) {
         >
           {copyLabel === 'Copied!' ? '✓ Copied!' : '⎘ Copy'}
         </button>
-        <button style={s.toolBtn} onClick={handleExport}>
-          ↓ Export .md
+        <button style={s.toolBtn} onClick={handleExportMarkdown}>
+          ↓ Markdown
+        </button>
+        <button
+          style={{ ...s.toolBtn, background: '#1f6feb22', borderColor: '#1f6feb55', color: '#79c0ff' }}
+          onClick={handleExportHtml}
+        >
+          ⬡ HTML Report
         </button>
       </div>
 
@@ -290,9 +345,13 @@ export default function Analysis({ data, aiConfig }) {
               flex: analysisHeight != null ? '0 0 auto' : 1,
             }}
           >
-            <div style={s.prose}>
-              <MarkdownRenderer content={analysis} />
-            </div>
+            {showSkeleton ? (
+              <AnalysisSkeleton />
+            ) : (
+              <div style={s.prose}>
+                <MarkdownRenderer content={analysis} />
+              </div>
+            )}
           </div>
 
           {/* Draggable splitter — replaces the old static border */}

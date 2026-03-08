@@ -103,6 +103,32 @@ const s = {
     marginBottom: '6px',
   },
 
+  advancedToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    background: 'none',
+    border: 'none',
+    color: '#6e7681',
+    cursor: 'pointer',
+    fontSize: '11px',
+    padding: '4px 0',
+    marginBottom: '8px',
+  },
+  advancedBox: {
+    marginBottom: '12px',
+    padding: '12px 14px',
+    background: '#0d111788',
+    border: '1px solid #21262d',
+    borderRadius: '6px',
+  },
+  urlHelperText: {
+    fontSize: '11px',
+    color: '#6e7681',
+    marginTop: '4px',
+    lineHeight: '1.5',
+  },
+
   divider: { borderTop: '1px solid #21262d', margin: '20px 0' },
 
   analyzeBtn: (loading) => ({
@@ -213,6 +239,10 @@ export default function InputScreen({ onAnalysisComplete }) {
   const [ollamaModels, setOllamaModels] = useState([])
   const [ollamaRunning, setOllamaRunning] = useState(null) // null = checking
   const [ollamaModel, setOllamaModel] = useState('')
+  const [ollamaBaseUrl, setOllamaBaseUrl] = useState(
+    () => localStorage.getItem('reposauge_ollama_url') || 'http://localhost:11434'
+  )
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   // Repo source
   const [sourceType, setSourceType] = useState('github')
@@ -234,11 +264,11 @@ export default function InputScreen({ onAnalysisComplete }) {
     setError(null)
   }
 
-  // ── Fetch Ollama models when provider switches to ollama ─────────────────
+  // ── Fetch Ollama models when provider or base URL changes ────────────────
   useEffect(() => {
     if (provider !== 'ollama') return
     setOllamaRunning(null)
-    fetch('/ollama/models')
+    fetch(`/ollama/models?base_url=${encodeURIComponent(ollamaBaseUrl)}`)
       .then((r) => r.json())
       .then((data) => {
         setOllamaRunning(data.running)
@@ -251,7 +281,13 @@ export default function InputScreen({ onAnalysisComplete }) {
         setOllamaRunning(false)
         setOllamaModels([])
       })
-  }, [provider])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, ollamaBaseUrl])
+
+  function handleBaseUrlChange(url) {
+    setOllamaBaseUrl(url)
+    localStorage.setItem('reposauge_ollama_url', url)
+  }
 
   // ── Ctrl+Enter to submit ────────────────────────────────────────────────
   const handleGlobalKeyDown = useCallback(
@@ -262,7 +298,7 @@ export default function InputScreen({ onAnalysisComplete }) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [loading, apiKey, provider, path, sourceType, githubToken, ollamaModel]
+    [loading, apiKey, provider, path, sourceType, githubToken, ollamaModel, ollamaBaseUrl]
   )
   useEffect(() => {
     document.addEventListener('keydown', handleGlobalKeyDown)
@@ -296,6 +332,7 @@ export default function InputScreen({ onAnalysisComplete }) {
         provider,
         api_key: apiKey,
         ollama_model: ollamaModel,
+        ollama_base_url: ollamaBaseUrl,
         source_type: sourceType,
         path: path.trim(),
         github_token: githubToken,
@@ -351,14 +388,18 @@ export default function InputScreen({ onAnalysisComplete }) {
               .map(([p, c]) => `## ${p}\n\`\`\`\n${c}\n\`\`\``)
               .join('\n\n')
 
+            // Derive a human-readable repo name from the URL or path
+            const repoName = path.trim().split('/').filter(Boolean).pop() || 'repo'
+
             onAnalysisComplete(
               {
                 analysis: data.analysis,
                 fileTree: data.file_tree,
                 fileContents: fileContentsStr,
                 estimatedTokens: data.estimated_tokens,
+                repoName,
               },
-              { provider, apiKey, ollamaModel }
+              { provider, apiKey, ollamaModel, ollamaBaseUrl }
             )
             return
           }
@@ -472,6 +513,34 @@ export default function InputScreen({ onAnalysisComplete }) {
               Free, runs locally. Pull models with{' '}
               <code style={{ fontFamily: 'monospace', fontSize: '11px' }}>ollama pull llama3.2</code>
             </div>
+
+            {/* ── Advanced: Custom Base URL ─────────────────────────── */}
+            <button
+              style={s.advancedToggle}
+              onClick={() => setShowAdvanced((v) => !v)}
+              disabled={loading}
+            >
+              <span style={{ fontSize: '9px' }}>{showAdvanced ? '▼' : '▶'}</span>
+              Advanced
+            </button>
+            {showAdvanced && (
+              <div style={s.advancedBox}>
+                <label style={{ ...s.sectionLabel, marginBottom: '6px' }}>Base URL</label>
+                <input
+                  style={{ ...s.input, marginBottom: '4px' }}
+                  type="text"
+                  placeholder="http://localhost:11434"
+                  value={ollamaBaseUrl}
+                  onChange={(e) => handleBaseUrlChange(e.target.value)}
+                  disabled={loading}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <div style={s.urlHelperText}>
+                  Ollama: 11434 &nbsp;|&nbsp; LM Studio: 1234 &nbsp;|&nbsp; LocalAI: 8080 &nbsp;|&nbsp; Jan.ai: 1337
+                </div>
+              </div>
+            )}
           </>
         )}
 
